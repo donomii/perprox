@@ -1,0 +1,4 @@
+*.bolt
+*.exe
+db/log
+*_req

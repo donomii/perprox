@@ -399,7 +399,7 @@ func main() {
 		})
 		logger.LogReq(req, ctx)
 		url := req.URL.String()
-		log.Println("Starting request handler")
+		log.Println("Starting request handler on", *addr)
 		//dbMutex.Lock()
 		//defer dbMutex.Unlock()
 
@@ -486,7 +486,7 @@ func main() {
 		log.Fatal(err)
 	}
 	//defer db.Close()
-	log.Println("Starting Proxy")
+	log.Println("Starting Proxy on", *addr)
 	http.Serve(sl, proxy)
 	sl.Wait()
 	log.Println("All connections closed - exit")

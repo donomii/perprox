@@ -1,6 +1,8 @@
 package main
 
 import (
+	"regexp"
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/gob"
@@ -24,6 +26,12 @@ import (
 	"github.com/elazarl/goproxy"
 	"github.com/elazarl/goproxy/transport"
 )
+
+func orPanic(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
 
 var dbMutex = sync.Mutex{}
 var counterMutex = sync.Mutex{}
@@ -383,6 +391,38 @@ func main() {
 	addr := flag.String("l", ":8080", "on which address should the proxy listen")
 	flag.Parse()
 	proxy := goproxy.NewProxyHttpServer()
+
+
+	proxy.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*:443$"))).
+		HijackConnect(func(req *http.Request, client net.Conn, ctx *goproxy.ProxyCtx) {
+		defer func() {
+			if e := recover(); e != nil {
+				ctx.Logf("error connecting to remote: %v", e)
+				client.Write([]byte("HTTP/1.1 500 Cannot reach destination\r\n\r\n"))
+			}
+			client.Close()
+		}()
+		log.Println("Intercepting https")
+		clientBuf := bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client))
+		remote, err := net.Dial("tcp", req.URL.Host)
+		orPanic(err)
+		remoteBuf := bufio.NewReadWriter(bufio.NewReader(remote), bufio.NewWriter(remote))
+		for {
+			req, err := http.ReadRequest(clientBuf.Reader)
+			orPanic(err)
+			orPanic(req.Write(remoteBuf))
+			orPanic(remoteBuf.Flush())
+			resp, err := http.ReadResponse(remoteBuf.Reader, req)
+			orPanic(err)
+			orPanic(resp.Write(clientBuf.Writer))
+			orPanic(clientBuf.Flush())
+		}
+	})
+
+
+
+
+
 	proxy.Verbose = *verbose
 	if err := os.MkdirAll("db", 0755); err != nil {
 		log.Fatal("Can't create dir", err)

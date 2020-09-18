@@ -1,22 +1,23 @@
 package main
 
 import (
-	"regexp"
-	"bufio"
 	"bytes"
 	"crypto/tls"
-	"encoding/gob"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
-	"path"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +25,6 @@ import (
 
 	"github.com/boltdb/bolt"
 	"github.com/elazarl/goproxy"
-	"github.com/elazarl/goproxy/transport"
 )
 
 func orPanic(err error) {
@@ -129,29 +129,6 @@ func (m *Meta) WriteTo(w io.Writer) (nr int64, err error) {
 	return
 }
 
-type HttpLogger struct {
-	path  string
-	c     chan *Meta
-	errch chan error
-}
-
-func NewLogger(basepath string) (*HttpLogger, error) {
-	f, err := os.Create(path.Join(basepath, "log"))
-	if err != nil {
-		return nil, err
-	}
-	logger := &HttpLogger{basepath, make(chan *Meta), make(chan error)}
-	go func() {
-		for m := range logger.c {
-			if _, err := m.WriteTo(f); err != nil {
-				log.Println("Can't write meta", err)
-			}
-		}
-		logger.errch <- f.Close()
-	}()
-	return logger, nil
-}
-
 type nopCloser struct {
 	*bytes.Buffer
 }
@@ -229,109 +206,6 @@ type MyResponse struct {
 	TLS *tls.ConnectionState
 }
 
-func (logger *HttpLogger) LogResp(resp *http.Response, ctx *goproxy.ProxyCtx) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("Recovered in f", r)
-		}
-	}()
-
-	//log.Printf("Response: %v\n", resp)
-
-	//re := regexp.MustCompile("[[:cntrl:]]|[\"#$%&'()*+,\\-/:;<=>?@[\\\\\\]^_`{|}~]")
-	//fname := re.ReplaceAllString(url, "_")
-	//log.Println("Saving to file: ", fname)
-	//body := path.Join(logger.path, fmt.Sprintf("resp_%s", fname))
-	from := ""
-	if ctx.UserData != nil {
-		from = ctx.UserData.(*transport.RoundTripDetails).TCPAddr.String()
-	}
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	var buff1 bytes.Buffer
-	var buff2 bytes.Buffer
-	if resp == nil {
-		resp = emptyResp
-	} else {
-		buff2.ReadFrom(NewTeeReadCloser(resp.Body, &nopCloser{&buff1}))
-		resp.Body = &nopCloser{&buff2}
-		data := buff1.Bytes()
-		if len(data) > 0 {
-
-			req := ctx.Req
-			url := req.URL.String()
-
-			var buff3 bytes.Buffer // Stand-in for a network connection
-			enc := gob.NewEncoder(&buff3)
-			var myResp = MyResponse{
-				resp.Status,
-				resp.StatusCode,
-				resp.Proto,
-				resp.ProtoMajor,
-				resp.ProtoMinor,
-				resp.Header,
-				data, //body
-				resp.ContentLength,
-				resp.TransferEncoding,
-				resp.Close,
-				resp.Uncompressed,
-				resp.Trailer,
-				req,
-				resp.TLS}
-			err1 := enc.Encode(myResp)
-			if err1 != nil {
-				log.Printf("Failed to encode response! %v\n", err1)
-			}
-
-			db.Update(func(tx *bolt.Tx) error {
-				b, err := tx.CreateBucketIfNotExists([]byte("MyBucket"))
-				//b = tx.Bucket([]byte("MyBucket"))
-				b.Delete([]byte(url))
-				data2 := buff3.Bytes()
-				err = b.Put([]byte(url), data2)
-				//log.Printf("Wrote (%s), %v\n", url, data)
-				return err
-			})
-		}
-	}
-	//args := sqlite3.NamedArgs{"$a": url, "$b": "dunno", "$c": buff1}
-	//db.Exec("INSERT INTO pages VALUES($a, $b, $c)", args)
-	logger.LogMeta(&Meta{
-		resp: resp,
-		err:  ctx.Error,
-		t:    time.Now(),
-		sess: ctx.Session,
-		from: from})
-
-}
-
-var emptyResp = &http.Response{}
-var emptyReq = &http.Request{}
-
-func (logger *HttpLogger) LogReq(req *http.Request, ctx *goproxy.ProxyCtx) {
-	body := path.Join(logger.path, fmt.Sprintf("%d_req", ctx.Session))
-	if req == nil {
-		req = emptyReq
-	} else {
-		req.Body = NewTeeReadCloser(req.Body, NewFileStream(body))
-	}
-	logger.LogMeta(&Meta{
-		req:  req,
-		err:  ctx.Error,
-		t:    time.Now(),
-		sess: ctx.Session,
-		from: req.RemoteAddr})
-}
-
-func (logger *HttpLogger) LogMeta(m *Meta) {
-	logger.c <- m
-}
-
-func (logger *HttpLogger) Close() error {
-	close(logger.c)
-	return <-logger.errch
-}
-
 type TeeReadCloser struct {
 	r io.Reader
 	w io.WriteCloser
@@ -391,119 +265,119 @@ func main() {
 	addr := flag.String("l", ":8080", "on which address should the proxy listen")
 	flag.Parse()
 	proxy := goproxy.NewProxyHttpServer()
-
-
-	proxy.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*:443$"))).
-		HijackConnect(func(req *http.Request, client net.Conn, ctx *goproxy.ProxyCtx) {
-		defer func() {
-			if e := recover(); e != nil {
-				ctx.Logf("error connecting to remote: %v", e)
-				client.Write([]byte("HTTP/1.1 500 Cannot reach destination\r\n\r\n"))
-			}
-			client.Close()
-		}()
-		log.Println("Intercepting https")
-		clientBuf := bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client))
-		remote, err := net.Dial("tcp", req.URL.Host)
-		orPanic(err)
-		remoteBuf := bufio.NewReadWriter(bufio.NewReader(remote), bufio.NewWriter(remote))
-		for {
-			req, err := http.ReadRequest(clientBuf.Reader)
-			orPanic(err)
-			orPanic(req.Write(remoteBuf))
-			orPanic(remoteBuf.Flush())
-			resp, err := http.ReadResponse(remoteBuf.Reader, req)
-			orPanic(err)
-			orPanic(resp.Write(clientBuf.Writer))
-			orPanic(clientBuf.Flush())
-		}
-	})
-
-
-
-
+	proxy.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("baidu.*:443$"))).
+		HandleConnect(goproxy.AlwaysReject)
+	proxy.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*$"))).
+		HandleConnect(goproxy.AlwaysMitm)
 
 	proxy.Verbose = *verbose
 	if err := os.MkdirAll("db", 0755); err != nil {
 		log.Fatal("Can't create dir", err)
 	}
-	logger, err := NewLogger("db")
-	if err != nil {
-		log.Fatal("can't open log file", err)
-	}
-	tr := transport.Transport{Proxy: transport.ProxyFromEnvironment}
-	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (resp *http.Response, err error) {
-			ctx.UserData, resp, err = tr.DetailedRoundTrip(req)
-			return
-		})
-		logger.LogReq(req, ctx)
-		url := req.URL.String()
-		log.Println("Starting request handler on", *addr)
-		//dbMutex.Lock()
-		//defer dbMutex.Unlock()
+	var err error
+	//tr := transport.Transport{Proxy: transport.ProxyFromEnvironment}
+	/*
+		proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (resp *http.Response, err error) {
+				ctx.UserData, resp, err = tr.DetailedRoundTrip(req)
+				return
+			})
+			return req, nil
+			//logger.LogReq(req, ctx)
+			url := req.URL.String()
+			log.Println("Starting request handler on", *addr)
+			//dbMutex.Lock()
+			//defer dbMutex.Unlock()
 
-		var packedResp []byte
+			var packedResp []byte
 
-		db.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("MyBucket"))
-			if b == nil {
-				log.Println("Failed to get bucket")
-				return fmt.Errorf("No bucket")
+			db.View(func(tx *bolt.Tx) error {
+				b := tx.Bucket([]byte("MyBucket"))
+				if b == nil {
+					log.Println("Failed to get bucket")
+					return fmt.Errorf("No bucket")
+				}
+				//b = tx.Bucket([]byte("MyBucket"))
+
+				log.Println("URL ", url)
+
+				packedResp = b.Get([]byte(url))
+				return nil
+			})
+			if packedResp != nil {
+
+				var resp = MyResponse{}
+				//anotherbuffer := bytes.NewBuffer(packedResp)
+
+				err = json.Unmarshal(packedResp, &resp)
+				if err != nil {
+					log.Printf("Error decoding response from cache: %v\n", err)
+				}
+				//log.Printf("Returning %v\n", resp)
+				body := bytes.NewBuffer(resp.Body)
+				bodyData, _ := ioutil.ReadAll(body)
+				bytes.ReplaceAll(bodyData, []byte("https"), []byte("http"))
+				body = bytes.NewBuffer(bodyData)
+				var myResp = http.Response{
+					resp.Status,
+					resp.StatusCode,
+					resp.Proto,
+					resp.ProtoMajor,
+					resp.ProtoMinor,
+					resp.Header,
+					&nopCloser{body}, //body
+					resp.ContentLength,
+					resp.TransferEncoding,
+					resp.Close,
+					resp.Uncompressed,
+					resp.Trailer,
+					req,
+					resp.TLS}
+				add1("hit")
+				log.Println("Using cached copy")
+				return req, &myResp
+
+			} else {
+				log.Println("Retrieve from cache failed or file not stored")
 			}
-			//b = tx.Bucket([]byte("MyBucket"))
+			log.Println("passing request")
 
-			log.Println("URL ", url)
-
-			packedResp = b.Get([]byte(url))
-			return nil
+			//log.Printf("Wrote (%s), %v\n", url, data)
+			add1("miss")
+			log.Println(counters)
+			return req, nil
 		})
-		if packedResp != nil {
-
-			var resp = MyResponse{}
-			anotherbuffer := bytes.NewBuffer(packedResp)
-
-			dec := gob.NewDecoder(anotherbuffer)
-			err = dec.Decode(&resp)
-			if err != nil {
-				log.Printf("Error decoding response from cache: %v\n", err)
-			}
-			//log.Printf("Returning %v\n", resp)
-			body := bytes.NewBuffer(resp.Body)
-
-			var myResp = http.Response{
-				resp.Status,
-				resp.StatusCode,
-				resp.Proto,
-				resp.ProtoMajor,
-				resp.ProtoMinor,
-				resp.Header,
-				&nopCloser{body}, //body
-				resp.ContentLength,
-				resp.TransferEncoding,
-				resp.Close,
-				resp.Uncompressed,
-				resp.Trailer,
-				req,
-				resp.TLS}
-			add1("hit")
-			log.Println("Using cached copy")
-			return req, &myResp
-
-		} else {
-			log.Println("Retrieve from cache failed or file not stored")
-		}
-		log.Println("passing request")
-
-		//log.Printf("Wrote (%s), %v\n", url, data)
-		add1("miss")
-		log.Println(counters)
-		return req, nil
-	})
+	*/
 	proxy.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		logger.LogResp(resp, ctx)
+		fmt.Printf("Response: %+v\n", resp)
+		data, _ := ioutil.ReadAll(resp.Body)
+		//fmt.Printf("Body: %v\n", string(data))
+
+		fmt.Printf("[%d] %s %s\n", resp.StatusCode, ctx.Req.Method, ctx.Req.URL)
+		u := ctx.Req.URL.String()
+		upath := ctx.Req.URL.Path
+
+		if upath == "" {
+			upath = upath + "/index.html"
+		}
+		if upath == "." {
+			upath = upath + "index.html"
+		}
+		if strings.HasSuffix(upath, "/") {
+			upath = upath + "index.html"
+		}
+		path := filepath.Clean(upath)
+		uobj, _ := url.Parse(u)
+		path = "rip/" + uobj.Hostname() + "/" + path
+		fmt.Printf("%v\n", path)
+		dir := filepath.Dir(path)
+		os.MkdirAll(dir, 0600)
+		ioutil.WriteFile(path, data, 0600)
+		r := bytes.NewReader(data)
+		resp.Body = ioutil.NopCloser(r)
 		return resp
 	})
+
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatal("listen:", err)
@@ -517,7 +391,7 @@ func main() {
 		os.Exit(1)
 		sl.Add(1)
 		sl.Close()
-		logger.Close()
+
 		sl.Done()
 	}()
 

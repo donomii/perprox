@@ -275,79 +275,7 @@ func main() {
 		log.Fatal("Can't create dir", err)
 	}
 	var err error
-	//tr := transport.Transport{Proxy: transport.ProxyFromEnvironment}
-	/*
-		proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-			ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (resp *http.Response, err error) {
-				ctx.UserData, resp, err = tr.DetailedRoundTrip(req)
-				return
-			})
-			return req, nil
-			//logger.LogReq(req, ctx)
-			url := req.URL.String()
-			log.Println("Starting request handler on", *addr)
-			//dbMutex.Lock()
-			//defer dbMutex.Unlock()
 
-			var packedResp []byte
-
-			db.View(func(tx *bolt.Tx) error {
-				b := tx.Bucket([]byte("MyBucket"))
-				if b == nil {
-					log.Println("Failed to get bucket")
-					return fmt.Errorf("No bucket")
-				}
-				//b = tx.Bucket([]byte("MyBucket"))
-
-				log.Println("URL ", url)
-
-				packedResp = b.Get([]byte(url))
-				return nil
-			})
-			if packedResp != nil {
-
-				var resp = MyResponse{}
-				//anotherbuffer := bytes.NewBuffer(packedResp)
-
-				err = json.Unmarshal(packedResp, &resp)
-				if err != nil {
-					log.Printf("Error decoding response from cache: %v\n", err)
-				}
-				//log.Printf("Returning %v\n", resp)
-				body := bytes.NewBuffer(resp.Body)
-				bodyData, _ := ioutil.ReadAll(body)
-				bytes.ReplaceAll(bodyData, []byte("https"), []byte("http"))
-				body = bytes.NewBuffer(bodyData)
-				var myResp = http.Response{
-					resp.Status,
-					resp.StatusCode,
-					resp.Proto,
-					resp.ProtoMajor,
-					resp.ProtoMinor,
-					resp.Header,
-					&nopCloser{body}, //body
-					resp.ContentLength,
-					resp.TransferEncoding,
-					resp.Close,
-					resp.Uncompressed,
-					resp.Trailer,
-					req,
-					resp.TLS}
-				add1("hit")
-				log.Println("Using cached copy")
-				return req, &myResp
-
-			} else {
-				log.Println("Retrieve from cache failed or file not stored")
-			}
-			log.Println("passing request")
-
-			//log.Printf("Wrote (%s), %v\n", url, data)
-			add1("miss")
-			log.Println(counters)
-			return req, nil
-		})
-	*/
 	proxy.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
 		fmt.Printf("Response: %+v\n", resp)
 		data, _ := ioutil.ReadAll(resp.Body)

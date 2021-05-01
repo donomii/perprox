@@ -255,6 +255,25 @@ func responseHandlerFunc(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Respo
 			} else {
 				log.Println("Error naming stream:", err)
 			}
+		} else if strings.Contains(path, "/videoplayback") {
+			log.Println("Found youtube  in ", path)
+			mimeType := ctx.Req.URL.Query().Get("mime")
+			log.Println("Mime type:", mimeType)
+			suffix := ".ts"
+			if strings.HasPrefix(mimeType, "audio/") {
+				suffix = "_audio." + strings.TrimPrefix(mimeType, "audio/")
+			}
+			if strings.HasPrefix(mimeType, "video/") {
+				suffix = "_video." + strings.TrimPrefix(mimeType, "video/")
+			}
+			path = ctx.Req.URL.Query().Get("ei")
+			streamName := path // path[:20]
+			log.Println("Streamname  ", streamName)
+
+			path = "streams/" + streamName + suffix
+			log.Println("Saving youtube to ", path)
+			SendToAppend(AppendRequest{path, savePipe})
+
 		} else {
 			path = "rip/" + uobj.Hostname() + "/" + path
 			path = strings.Replace(path, ":", "", -1)
@@ -268,23 +287,28 @@ func responseHandlerFunc(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Respo
 				//SendToAppend(AppendRequest{path, savePipe})
 				go io.CopyBuffer(ioutil.Discard, savePipe, nil)
 			} else {
-				go func() {
-					path := normalisePath(path)
-					log.Printf("Saving whole file to path %v\n", path)
-					dir := filepath.Dir(path)
-					//log.Printf("makedir %v\n", dir)
-					os.MkdirAll(dir, 0600)
-					f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
-					if err != nil {
-						log.Println(err, path)
-						go io.CopyBuffer(ioutil.Discard, savePipe, nil)
-						return
-					}
-					defer f.Close()
-					io.CopyBuffer(f, savePipe, nil)
-					f.Close()
-					savePipe.Close()
-				}()
+				if goof.Exists(path) && filename == "videoplayback" {
+					SendToAppend(AppendRequest{"streams/videoplayback.ts", savePipe})
+					//go io.CopyBuffer(ioutil.Discard, savePipe, nil)
+				} else {
+					go func() {
+						path := normalisePath(path)
+						log.Printf("Saving whole file to path %v\n", path)
+						dir := filepath.Dir(path)
+						//log.Printf("makedir %v\n", dir)
+						os.MkdirAll(dir, 0600)
+						f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+						if err != nil {
+							log.Println(err, path)
+							go io.CopyBuffer(ioutil.Discard, savePipe, nil)
+							return
+						}
+						defer f.Close()
+						io.CopyBuffer(f, savePipe, nil)
+						f.Close()
+						savePipe.Close()
+					}()
+				}
 			}
 		}
 	}()

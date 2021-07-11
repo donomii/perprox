@@ -121,9 +121,10 @@ func appendWorker() {
 			if err != nil {
 				log.Println("Error opening file: ", err)
 			} else {
-				f := bufio.NewWriterSize(fh, 100000)
+
+				f := bufio.NewWriterSize(fh, 10000)
 				appendHandleCache[path] = f
-				ch = make(chan AppendRequest, 10000)
+				ch = make(chan AppendRequest, 1)
 				appendChanCache[path] = &ch
 				go fileWriteWorker(ch, f)
 				ch <- req
@@ -291,23 +292,27 @@ func responseHandlerFunc(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Respo
 					SendToAppend(AppendRequest{"streams/videoplayback.ts", savePipe})
 					//go io.CopyBuffer(ioutil.Discard, savePipe, nil)
 				} else {
-					go func() {
-						path := normalisePath(path)
-						log.Printf("Saving whole file to path %v\n", path)
-						dir := filepath.Dir(path)
-						//log.Printf("makedir %v\n", dir)
-						os.MkdirAll(dir, 0600)
-						f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
-						if err != nil {
-							log.Println(err, path)
-							go io.CopyBuffer(ioutil.Discard, savePipe, nil)
-							return
-						}
-						defer f.Close()
-						io.CopyBuffer(f, savePipe, nil)
-						f.Close()
-						savePipe.Close()
-					}()
+					if strings.Contains(path, ".m3u8") {
+						go io.CopyBuffer(ioutil.Discard, savePipe, nil)
+					} else {
+						go func() {
+							path := normalisePath(path)
+							log.Printf("Saving whole file to path %v\n", path)
+							dir := filepath.Dir(path)
+							//log.Printf("makedir %v\n", dir)
+							os.MkdirAll(dir, 0600)
+							f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+							if err != nil {
+								log.Println(err, path)
+								go io.CopyBuffer(ioutil.Discard, savePipe, nil)
+								return
+							}
+							defer f.Close()
+							io.CopyBuffer(f, savePipe, nil)
+							f.Close()
+							savePipe.Close()
+						}()
+					}
 				}
 			}
 		}
